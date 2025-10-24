@@ -1,0 +1,1000 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auto Crypto Screener - Top 100 Coins</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            min-height: 100vh;
+        }
+        .card-glow {
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+        }
+        .coin-card {
+            transition: all 0.3s ease;
+            border: 1px solid rgba(59, 130, 246, 0.2);
+        }
+        .coin-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 24px rgba(59, 130, 246, 0.4);
+        }
+        .grade-A { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
+        .grade-B { background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); }
+        .grade-C { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
+        .grade-D { background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); }
+        .bullish { color: #10b981; }
+        .bearish { color: #ef4444; }
+        .neutral { color: #f59e0b; }
+        .loading-spinner {
+            border: 3px solid rgba(59, 130, 246, 0.3);
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .5; }
+        }
+        .progress-bar {
+            transition: width 0.3s ease;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        // ======================
+        // API INTEGRATION LAYER
+        // ======================
+
+        const COINGECKO_BASE = 'https://api.coingecko.com/api/v3';
+        const BINANCE_BASE = 'https://api.binance.com/api/v3';
+
+        // Technical Indicator Calculators
+        class TechnicalAnalysis {
+            static calculateRSI(candles, period = 14) {
+                if (candles.length < period + 1) return 50;
+                
+                const closes = candles.map(c => c.close);
+                let gains = 0, losses = 0;
+                
+                for (let i = 1; i <= period; i++) {
+                    const change = closes[i] - closes[i - 1];
+                    if (change > 0) gains += change;
+                    else losses += Math.abs(change);
+                }
+                
+                let avgGain = gains / period;
+                let avgLoss = losses / period;
+                
+                for (let i = period + 1; i < closes.length; i++) {
+                    const change = closes[i] - closes[i - 1];
+                    if (change > 0) {
+                        avgGain = ((avgGain * (period - 1)) + change) / period;
+                        avgLoss = (avgLoss * (period - 1)) / period;
+                    } else {
+                        avgGain = (avgGain * (period - 1)) / period;
+                        avgLoss = ((avgLoss * (period - 1)) + Math.abs(change)) / period;
+                    }
+                }
+                
+                const rs = avgGain / avgLoss;
+                return 100 - (100 / (1 + rs));
+            }
+
+            static calculateATR(candles, period = 14) {
+                if (candles.length < period + 1) return 5.0;
+                
+                const trueRanges = [];
+                for (let i = 1; i < candles.length; i++) {
+                    const tr = Math.max(
+                        candles[i].high - candles[i].low,
+                        Math.abs(candles[i].high - candles[i - 1].close),
+                        Math.abs(candles[i].low - candles[i - 1].close)
+                    );
+                    trueRanges.push(tr);
+                }
+                
+                let atr = trueRanges.slice(0, period).reduce((a, b) => a + b, 0) / period;
+                for (let i = period; i < trueRanges.length; i++) {
+                    atr = ((atr * (period - 1)) + trueRanges[i]) / period;
+                }
+                
+                return (atr / candles[candles.length - 1].close) * 100;
+            }
+
+            static calculateEMA(data, period) {
+                const ema = [];
+                const multiplier = 2 / (period + 1);
+                let sum = 0;
+                
+                for (let i = 0; i < period; i++) sum += data[i];
+                ema.push(sum / period);
+                
+                for (let i = period; i < data.length; i++) {
+                    ema.push((data[i] - ema[ema.length - 1]) * multiplier + ema[ema.length - 1]);
+                }
+                return ema;
+            }
+
+            static calculateMACD(candles) {
+                if (candles.length < 35) return 'neutral';
+                
+                const closes = candles.map(c => c.close);
+                const emaFast = this.calculateEMA(closes, 12);
+                const emaSlow = this.calculateEMA(closes, 26);
+                
+                const macdLine = emaFast[emaFast.length - 1] - emaSlow[emaSlow.length - 1];
+                
+                const macdValues = [];
+                for (let i = 0; i < Math.min(emaFast.length, emaSlow.length); i++) {
+                    macdValues.push(emaFast[i] - emaSlow[i]);
+                }
+                
+                const signalLine = this.calculateEMA(macdValues, 9);
+                const signal = signalLine[signalLine.length - 1];
+                
+                if (macdLine > signal && macdLine > 0) return 'bullish';
+                if (macdLine < signal && macdLine < 0) return 'bearish';
+                return 'neutral';
+            }
+
+            static detectTrend(candles, period = 20) {
+                if (candles.length < period) return 'sideways';
+                
+                const recent = candles.slice(-period);
+                const closes = recent.map(c => c.close);
+                const sma = closes.reduce((a, b) => a + b, 0) / closes.length;
+                const current = closes[closes.length - 1];
+                
+                const highs = recent.map(c => c.high);
+                const lows = recent.map(c => c.low);
+                
+                const recentHigh = Math.max(...highs.slice(-5));
+                const previousHigh = Math.max(...highs.slice(-10, -5));
+                const recentLow = Math.min(...lows.slice(-5));
+                const previousLow = Math.min(...lows.slice(-10, -5));
+                
+                if (current > sma && recentHigh > previousHigh && recentLow > previousLow) {
+                    return 'uptrend';
+                } else if (current < sma && recentHigh < previousHigh && recentLow < previousLow) {
+                    return 'downtrend';
+                }
+                return 'sideways';
+            }
+        }
+
+        // API Service
+        class CryptoDataService {
+            static cache = new Map();
+            static CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
+            static async fetchWithCache(url, key) {
+                const cached = this.cache.get(key);
+                if (cached && Date.now() - cached.timestamp < this.CACHE_DURATION) {
+                    return cached.data;
+                }
+
+                try {
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    const data = await response.json();
+                    this.cache.set(key, { data, timestamp: Date.now() });
+                    return data;
+                } catch (error) {
+                    console.error(`Fetch error for ${key}:`, error);
+                    return null;
+                }
+            }
+
+            // Fetch top coins by market cap (automatically!)
+            static async getTopCoinsByMarketCap(limit = 100) {
+                console.log(`Fetching top ${limit} coins by market cap...`);
+                const url = `${COINGECKO_BASE}/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=${limit}&page=1&sparkline=false&price_change_percentage=24h`;
+                return await this.fetchWithCache(url, `top_coins_${limit}`);
+            }
+
+            static async getCoinDetails(coinId) {
+                const url = `${COINGECKO_BASE}/coins/${coinId}?localization=false&tickers=false&community_data=true&developer_data=true`;
+                return await this.fetchWithCache(url, `details_${coinId}`);
+            }
+
+            static async getBinanceCandles(symbol, interval = '1d', limit = 100) {
+                // Try to construct Binance symbol
+                const binanceSymbol = `${symbol.toUpperCase()}USDT`;
+                const url = `${BINANCE_BASE}/klines?symbol=${binanceSymbol}&interval=${interval}&limit=${limit}`;
+                const data = await this.fetchWithCache(url, `candles_${binanceSymbol}`);
+                
+                if (!data || data.code) return null; // Binance error or not listed
+                
+                return data.map(candle => ({
+                    timestamp: candle[0],
+                    open: parseFloat(candle[1]),
+                    high: parseFloat(candle[2]),
+                    low: parseFloat(candle[3]),
+                    close: parseFloat(candle[4]),
+                    volume: parseFloat(candle[5])
+                }));
+            }
+
+            static async getCompleteCoinData(coin, onProgress) {
+                try {
+                    if (onProgress) onProgress(`Processing ${coin.symbol.toUpperCase()}...`);
+                    
+                    // We already have basic market data from the top coins call
+                    // Now fetch detailed data
+                    const details = await this.getCoinDetails(coin.id);
+                    
+                    // Try to fetch technical data from Binance
+                    const candles = await this.getBinanceCandles(coin.symbol, '1d', 100);
+                    
+                    // Calculate technical indicators
+                    let technicals = {
+                        rsi: 50,
+                        atr: 5.0,
+                        macd: 'neutral',
+                        trend: 'sideways'
+                    };
+                    
+                    if (candles && candles.length >= 50) {
+                        technicals = {
+                            rsi: TechnicalAnalysis.calculateRSI(candles, 14),
+                            atr: TechnicalAnalysis.calculateATR(candles, 14),
+                            macd: TechnicalAnalysis.calculateMACD(candles),
+                            trend: TechnicalAnalysis.detectTrend(candles, 20)
+                        };
+                    }
+                    
+                    // Calculate community score
+                    const community = details?.community_data || {};
+                    const communityScore = Math.min(100, Math.floor(
+                        (community.twitter_followers || 0) / 10000 * 0.4 +
+                        (community.telegram_channel_user_count || 0) / 10000 * 0.3 +
+                        (community.reddit_subscribers || 0) / 1000 * 0.3
+                    ));
+                    
+                    // Calculate dev activity score
+                    const dev = details?.developer_data || {};
+                    const githubScore = Math.min(100, Math.floor(
+                        (dev.commit_count_4_weeks || 0) / 100 * 50 +
+                        ((dev.code_additions_deletions_4_weeks?.additions || 0) / 1000) * 30 +
+                        (dev.pull_requests_merged || 0) / 50 * 20
+                    ));
+                    
+                    // Extract catalysts from description
+                    const catalysts = this.extractCatalysts(details?.description?.en || '');
+                    
+                    // Determine exchanges (simplified - based on volume)
+                    const exchanges = ['CoinGecko Listed'];
+                    if (coin.total_volume > 50000000) exchanges.push('Major CEX');
+                    if (coin.market_cap > 1000000000) exchanges.push('Tier 1');
+                    
+                    return {
+                        id: coin.id,
+                        symbol: coin.symbol.toUpperCase(),
+                        name: coin.name,
+                        price: coin.current_price,
+                        marketCap: coin.market_cap,
+                        volume: coin.total_volume,
+                        priceChange24h: coin.price_change_percentage_24h,
+                        marketCapRank: coin.market_cap_rank,
+                        
+                        // Technicals
+                        atr: parseFloat(technicals.atr.toFixed(2)),
+                        rsi: Math.round(technicals.rsi),
+                        macd: technicals.macd,
+                        trend: technicals.trend,
+                        
+                        // Fundamentals
+                        community: communityScore,
+                        githubActivity: githubScore,
+                        catalysts: catalysts,
+                        useCase: this.extractUseCase(details?.description?.en || '', coin.name),
+                        
+                        // Risk metrics
+                        stopLossDistance: parseFloat((technicals.atr * 2).toFixed(2)),
+                        rrRatio: this.calculateRiskReward(technicals),
+                        
+                        exchanges: exchanges,
+                        lastUpdated: Date.now()
+                    };
+                } catch (error) {
+                    console.error(`Error fetching ${coin.symbol}:`, error);
+                    return null;
+                }
+            }
+
+            static extractUseCase(description, name) {
+                const desc = description.toLowerCase();
+                const coinName = name.toLowerCase();
+                
+                if (desc.includes('defi') || desc.includes('decentralized finance')) return 'DeFi Protocol';
+                if (desc.includes('layer 1') || desc.includes('blockchain platform')) return 'Layer 1 Blockchain';
+                if (desc.includes('layer 2') || desc.includes('layer-2') || desc.includes('scaling')) return 'Layer 2 Scaling';
+                if (desc.includes('oracle') || coinName.includes('chainlink')) return 'Oracle Network';
+                if (desc.includes('nft') || desc.includes('gaming') || desc.includes('game')) return 'NFT/Gaming';
+                if (desc.includes('metaverse') || desc.includes('virtual world')) return 'Metaverse';
+                if (desc.includes('exchange') || desc.includes('dex')) return 'Exchange Token';
+                if (desc.includes('stablecoin') || desc.includes('stable coin')) return 'Stablecoin';
+                if (desc.includes('meme') || coinName.includes('doge') || coinName.includes('shib')) return 'Meme Coin';
+                if (desc.includes('ai') || desc.includes('artificial intelligence')) return 'AI/ML';
+                if (desc.includes('privacy') || desc.includes('anonymous')) return 'Privacy Coin';
+                if (desc.includes('storage') || desc.includes('data')) return 'Storage/Data';
+                return 'Cryptocurrency';
+            }
+
+            static extractCatalysts(description) {
+                const catalysts = [];
+                const desc = description.toLowerCase();
+                
+                if (desc.includes('upgrade') || desc.includes('update') || desc.includes('launch')) 
+                    catalysts.push('Network upgrade');
+                if (desc.includes('partnership') || desc.includes('partner')) 
+                    catalysts.push('Strategic partnerships');
+                if (desc.includes('staking') || desc.includes('stake')) 
+                    catalysts.push('Staking program');
+                if (desc.includes('mainnet') || desc.includes('testnet')) 
+                    catalysts.push('Network milestone');
+                    
+                return catalysts;
+            }
+
+            static calculateRiskReward(technicals) {
+                let ratio = 2.0;
+                if (technicals.trend === 'uptrend') ratio += 0.5;
+                if (technicals.macd === 'bullish') ratio += 0.3;
+                if (technicals.rsi >= 45 && technicals.rsi <= 65) ratio += 0.2;
+                return parseFloat(Math.min(3.5, ratio).toFixed(1));
+            }
+        }
+
+        // ======================
+        // REACT COMPONENT
+        // ======================
+
+        function CryptoScreener() {
+            const [coins, setCoins] = useState([]);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState(null);
+            const [loadingProgress, setLoadingProgress] = useState(0);
+            const [loadingMessage, setLoadingMessage] = useState('');
+            const [coinLimit, setCoinLimit] = useState(50); // Default to top 50
+            const [filters, setFilters] = useState({
+                minMarketCap: 100000000,
+                maxMarketCap: 100000000000,
+                minVolume: 10000000,
+                minAtr: 5,
+                maxRsi: 100,
+                minRsi: 0,
+                trend: 'all',
+                macd: 'all',
+                minCommunity: 0,
+                minGithub: 0,
+                hasCatalysts: false,
+                minRRRatio: 0
+            });
+            const [sortBy, setSortBy] = useState('grade');
+            const [lastUpdated, setLastUpdated] = useState(null);
+
+            useEffect(() => {
+                loadCoinsData();
+            }, [coinLimit]);
+
+            const loadCoinsData = async () => {
+                setLoading(true);
+                setError(null);
+                setLoadingProgress(0);
+                setLoadingMessage('Fetching top coins from CoinGecko...');
+                
+                try {
+                    // Step 1: Get top coins by market cap
+                    const topCoins = await CryptoDataService.getTopCoinsByMarketCap(coinLimit);
+                    
+                    if (!topCoins || topCoins.length === 0) {
+                        throw new Error('Failed to fetch coins from CoinGecko');
+                    }
+                    
+                    setLoadingProgress(10);
+                    setLoadingMessage(`Found ${topCoins.length} coins. Analyzing each coin...`);
+                    
+                    const loadedCoins = [];
+                    const totalCoins = topCoins.length;
+                    
+                    // Step 2: Process each coin with detailed data
+                    for (let i = 0; i < topCoins.length; i++) {
+                        const coinData = await CryptoDataService.getCompleteCoinData(
+                            topCoins[i],
+                            (msg) => setLoadingMessage(msg)
+                        );
+                        
+                        if (coinData) {
+                            loadedCoins.push(coinData);
+                        }
+                        
+                        const progress = 10 + Math.round(((i + 1) / totalCoins) * 90);
+                        setLoadingProgress(progress);
+                        
+                        // Rate limiting: 50 calls per minute = ~1.2 seconds per call
+                        // But we need to be conservative, so 1.5 seconds
+                        if (i < topCoins.length - 1) {
+                            await new Promise(resolve => setTimeout(resolve, 1500));
+                        }
+                    }
+                    
+                    setCoins(loadedCoins);
+                    setLastUpdated(new Date());
+                    setError(null);
+                    setLoadingMessage('Complete!');
+                } catch (err) {
+                    setError('Failed to load coin data. Please try again or reduce the number of coins.');
+                    console.error('Load error:', err);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const calculateGrade = (coin) => {
+                let score = 0;
+                
+                // Market cap & liquidity (25 points)
+                if (coin.marketCap >= 1000000000 && coin.marketCap <= 10000000000) score += 15;
+                else if (coin.marketCap >= 100000000) score += 10;
+                if (coin.volume >= 100000000) score += 10;
+                else if (coin.volume >= 50000000) score += 7;
+                else if (coin.volume >= 10000000) score += 5;
+                
+                // Volatility (15 points)
+                if (coin.atr >= 6 && coin.atr <= 10) score += 15;
+                else if (coin.atr >= 5) score += 10;
+                
+                // Technical setup (25 points)
+                if (coin.trend === 'uptrend') score += 10;
+                if (coin.macd === 'bullish') score += 10;
+                if (coin.rsi >= 45 && coin.rsi <= 65) score += 5;
+                else if (coin.rsi >= 35 && coin.rsi <= 75) score += 3;
+                
+                // Fundamentals (20 points)
+                if (coin.githubActivity >= 85) score += 7;
+                else if (coin.githubActivity >= 70) score += 5;
+                if (coin.community >= 80) score += 6;
+                else if (coin.community >= 65) score += 4;
+                if (coin.catalysts && coin.catalysts.length > 0) score += 7;
+                
+                // Risk management (15 points)
+                if (coin.rrRatio >= 2.5) score += 10;
+                else if (coin.rrRatio >= 2.0) score += 7;
+                else if (coin.rrRatio >= 1.5) score += 4;
+                if (coin.stopLossDistance <= 5) score += 5;
+                else if (coin.stopLossDistance <= 7) score += 3;
+                
+                if (score >= 80) return 'A';
+                if (score >= 65) return 'B';
+                if (score >= 45) return 'C';
+                return 'D';
+            };
+
+            const filteredCoins = useMemo(() => {
+                return coins.filter(coin => {
+                    if (coin.marketCap < filters.minMarketCap || coin.marketCap > filters.maxMarketCap) return false;
+                    if (coin.volume < filters.minVolume) return false;
+                    if (coin.atr < filters.minAtr) return false;
+                    if (coin.rsi < filters.minRsi || coin.rsi > filters.maxRsi) return false;
+                    if (filters.trend !== 'all' && coin.trend !== filters.trend) return false;
+                    if (filters.macd !== 'all' && coin.macd !== filters.macd) return false;
+                    if (coin.community < filters.minCommunity) return false;
+                    if (coin.githubActivity < filters.minGithub) return false;
+                    if (filters.hasCatalysts && (!coin.catalysts || coin.catalysts.length === 0)) return false;
+                    if (coin.rrRatio < filters.minRRRatio) return false;
+                    return true;
+                }).map(coin => ({
+                    ...coin,
+                    grade: calculateGrade(coin)
+                })).sort((a, b) => {
+                    if (sortBy === 'grade') {
+                        const gradeOrder = { 'A': 4, 'B': 3, 'C': 2, 'D': 1 };
+                        return gradeOrder[b.grade] - gradeOrder[a.grade];
+                    }
+                    if (sortBy === 'volume') return b.volume - a.volume;
+                    if (sortBy === 'marketCap') return b.marketCap - a.marketCap;
+                    if (sortBy === 'atr') return b.atr - a.atr;
+                    if (sortBy === 'rrRatio') return b.rrRatio - a.rrRatio;
+                    return 0;
+                });
+            }, [coins, filters, sortBy]);
+
+            const formatNumber = (num) => {
+                if (num >= 1000000000) return `$${(num / 1000000000).toFixed(2)}B`;
+                if (num >= 1000000) return `$${(num / 1000000).toFixed(0)}M`;
+                return `$${num.toLocaleString()}`;
+            };
+
+            const gradeStats = useMemo(() => {
+                const stats = { A: 0, B: 0, C: 0, D: 0 };
+                filteredCoins.forEach(coin => stats[coin.grade]++);
+                return stats;
+            }, [filteredCoins]);
+
+            if (loading) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center p-4">
+                        <div className="text-center max-w-md w-full">
+                            <div className="loading-spinner mx-auto mb-4"></div>
+                            <h2 className="text-2xl font-bold text-white mb-2">Loading Top {coinLimit} Coins...</h2>
+                            <p className="text-gray-400 mb-4">{loadingMessage}</p>
+                            <div className="w-full bg-slate-700 rounded-full h-4 overflow-hidden">
+                                <div 
+                                    className="bg-gradient-to-r from-blue-500 to-purple-500 h-full progress-bar"
+                                    style={{width: `${loadingProgress}%`}}
+                                ></div>
+                            </div>
+                            <p className="text-blue-400 font-bold text-xl mt-3">{loadingProgress}%</p>
+                            <div className="mt-6 p-4 bg-slate-800 rounded-lg border border-slate-700">
+                                <p className="text-gray-400 text-sm">
+                                    <i className="fas fa-info-circle text-blue-400 mr-2"></i>
+                                    This process takes 1-3 minutes depending on the number of coins.
+                                </p>
+                                <p className="text-gray-500 text-xs mt-2">
+                                    We're fetching real-time data from CoinGecko & Binance APIs with rate limiting.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (error) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center p-4">
+                        <div className="bg-red-900/20 border border-red-500 rounded-xl p-8 max-w-md text-center">
+                            <i className="fas fa-exclamation-triangle text-5xl text-red-500 mb-4"></i>
+                            <h2 className="text-2xl font-bold text-white mb-2">Error Loading Data</h2>
+                            <p className="text-gray-300 mb-4">{error}</p>
+                            <div className="flex gap-3 justify-center">
+                                <button 
+                                    onClick={loadCoinsData}
+                                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg transition"
+                                >
+                                    <i className="fas fa-redo mr-2"></i>
+                                    Retry
+                                </button>
+                                <button 
+                                    onClick={() => {
+                                        setCoinLimit(25);
+                                        setError(null);
+                                    }}
+                                    className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-6 rounded-lg transition"
+                                >
+                                    <i className="fas fa-arrow-down mr-2"></i>
+                                    Try 25 Coins
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen p-4 md:p-8">
+                    <div className="max-w-7xl mx-auto">
+                        {/* Header */}
+                        <div className="text-center mb-8">
+                            <div className="flex items-center justify-center gap-3 mb-3">
+                                <div className="w-3 h-3 bg-green-500 rounded-full pulse"></div>
+                                <h1 className="text-4xl md:text-5xl font-bold text-white">
+                                    <i className="fas fa-rocket text-blue-400 mr-3"></i>
+                                    Auto Crypto Screener
+                                </h1>
+                            </div>
+                            <p className="text-gray-400 text-lg mb-2">Automatically scanning top {coinLimit} coins by market cap</p>
+                            {lastUpdated && (
+                                <div className="text-sm text-gray-500">
+                                    Last updated: {lastUpdated.toLocaleTimeString()} 
+                                    <button 
+                                        onClick={loadCoinsData}
+                                        className="ml-3 text-blue-400 hover:text-blue-300 transition"
+                                        title="Refresh data"
+                                    >
+                                        <i className="fas fa-sync-alt"></i>
+                                    </button>
+                                </div>
+                            )}
+                            
+                            {/* Coin Limit Selector */}
+                            <div className="mt-4 flex items-center justify-center gap-3">
+                                <label className="text-gray-300 font-semibold">Scan Top:</label>
+                                <select 
+                                    value={coinLimit}
+                                    onChange={(e) => setCoinLimit(Number(e.target.value))}
+                                    className="bg-slate-700 text-white rounded-lg px-4 py-2 border border-slate-600 font-semibold"
+                                >
+                                    <option value={25}>25 Coins (Fast - 45s)</option>
+                                    <option value={50}>50 Coins (Medium - 90s)</option>
+                                    <option value={75}>75 Coins (Slow - 2min)</option>
+                                    <option value={100}>100 Coins (Full - 3min)</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        {/* Stats Bar */}
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+                            <div className="bg-slate-800 rounded-lg p-4 text-center border border-slate-700">
+                                <div className="text-2xl font-bold text-white">{filteredCoins.length}</div>
+                                <div className="text-gray-400 text-sm">Matches</div>
+                            </div>
+                            <div className="bg-gradient-to-br from-green-600 to-green-700 rounded-lg p-4 text-center">
+                                <div className="text-2xl font-bold text-white">{gradeStats.A}</div>
+                                <div className="text-green-100 text-sm font-semibold">A Grade</div>
+                            </div>
+                            <div className="bg-gradient-to-br from-blue-600 to-blue-700 rounded-lg p-4 text-center">
+                                <div className="text-2xl font-bold text-white">{gradeStats.B}</div>
+                                <div className="text-blue-100 text-sm font-semibold">B Grade</div>
+                            </div>
+                            <div className="bg-gradient-to-br from-orange-600 to-orange-700 rounded-lg p-4 text-center">
+                                <div className="text-2xl font-bold text-white">{gradeStats.C}</div>
+                                <div className="text-orange-100 text-sm font-semibold">C Grade</div>
+                            </div>
+                            <div className="bg-gradient-to-br from-red-600 to-red-700 rounded-lg p-4 text-center">
+                                <div className="text-2xl font-bold text-white">{gradeStats.D}</div>
+                                <div className="text-red-100 text-sm font-semibold">D Grade</div>
+                            </div>
+                        </div>
+
+                        {/* Filters Section */}
+                        <div className="bg-slate-800 rounded-xl p-6 mb-6 border border-slate-700 card-glow">
+                            <h2 className="text-xl font-bold text-white mb-4 flex items-center">
+                                <i className="fas fa-filter text-blue-400 mr-2"></i>
+                                Filter Criteria
+                            </h2>
+                            
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                                {/* Market Cap Range */}
+                                <div>
+                                    <label className="block text-gray-300 text-sm font-semibold mb-2">
+                                        Min Market Cap
+                                    </label>
+                                    <select 
+                                        className="w-full bg-slate-700 text-white rounded-lg px-4 py-2 border border-slate-600"
+                                        value={filters.minMarketCap}
+                                        onChange={(e) => setFilters({...filters, minMarketCap: Number(e.target.value)})}
+                                    >
+                                        <option value={100000000}>$100M</option>
+                                        <option value={500000000}>$500M</option>
+                                        <option value={1000000000}>$1B</option>
+                                        <option value={5000000000}>$5B</option>
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label className="block text-gray-300 text-sm font-semibold mb-2">
+                                        Max Market Cap
+                                    </label>
+                                    <select 
+                                        className="w-full bg-slate-700 text-white rounded-lg px-4 py-2 border border-slate-600"
+                                        value={filters.maxMarketCap}
+                                        onChange={(e) => setFilters({...filters, maxMarketCap: Number(e.target.value)})}
+                                    >
+                                        <option value={5000000000}>$5B</option>
+                                        <option value={10000000000}>$10B</option>
+                                        <option value={50000000000}>$50B</option>
+                                        <option value={100000000000}>$100B</option>
+                                    </select>
+                                </div>
+
+                                {/* Volume */}
+                                <div>
+                                    <label className="block text-gray-300 text-sm font-semibold mb-2">
+                                        Min Daily Volume
+                                    </label>
+                                    <select 
+                                        className="w-full bg-slate-700 text-white rounded-lg px-4 py-2 border border-slate-600"
+                                        value={filters.minVolume}
+                                        onChange={(e) => setFilters({...filters, minVolume: Number(e.target.value)})}
+                                    >
+                                        <option value={10000000}>$10M</option>
+                                        <option value={50000000}>$50M</option>
+                                        <option value={100000000}>$100M</option>
+                                        <option value={250000000}>$250M</option>
+                                    </select>
+                                </div>
+
+                                {/* ATR */}
+                                <div>
+                                    <label className="block text-gray-300 text-sm font-semibold mb-2">
+                                        Min ATR (Volatility %)
+                                    </label>
+                                    <input 
+                                        type="range"
+                                        min="0"
+                                        max="15"
+                                        step="0.5"
+                                        value={filters.minAtr}
+                                        onChange={(e) => setFilters({...filters, minAtr: Number(e.target.value)})}
+                                        className="w-full"
+                                    />
+                                    <div className="text-center text-blue-400 font-bold mt-1">{filters.minAtr}%</div>
+                                </div>
+
+                                {/* RSI Range */}
+                                <div>
+                                    <label className="block text-gray-300 text-sm font-semibold mb-2">
+                                        RSI Range
+                                    </label>
+                                    <div className="flex gap-2">
+                                        <input 
+                                            type="number"
+                                            placeholder="Min"
+                                            value={filters.minRsi}
+                                            onChange={(e) => setFilters({...filters, minRsi: Number(e.target.value)})}
+                                            className="w-1/2 bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600"
+                                        />
+                                        <input 
+                                            type="number"
+                                            placeholder="Max"
+                                            value={filters.maxRsi}
+                                            onChange={(e) => setFilters({...filters, maxRsi: Number(e.target.value)})}
+                                            className="w-1/2 bg-slate-700 text-white rounded-lg px-3 py-2 border border-slate-600"
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Trend */}
+                                <div>
+                                    <label className="block text-gray-300 text-sm font-semibold mb-2">
+                                        Trend Direction
+                                    </label>
+                                    <select 
+                                        className="w-full bg-slate-700 text-white rounded-lg px-4 py-2 border border-slate-600"
+                                        value={filters.trend}
+                                        onChange={(e) => setFilters({...filters, trend: e.target.value})}
+                                    >
+                                        <option value="all">All Trends</option>
+                                        <option value="uptrend">Uptrend Only</option>
+                                        <option value="sideways">Sideways</option>
+                                        <option value="downtrend">Downtrend</option>
+                                    </select>
+                                </div>
+
+                                {/* MACD */}
+                                <div>
+                                    <label className="block text-gray-300 text-sm font-semibold mb-2">
+                                        MACD Signal
+                                    </label>
+                                    <select 
+                                        className="w-full bg-slate-700 text-white rounded-lg px-4 py-2 border border-slate-600"
+                                        value={filters.macd}
+                                        onChange={(e) => setFilters({...filters, macd: e.target.value})}
+                                    >
+                                        <option value="all">All Signals</option>
+                                        <option value="bullish">Bullish Only</option>
+                                        <option value="neutral">Neutral</option>
+                                        <option value="bearish">Bearish</option>
+                                    </select>
+                                </div>
+
+                                {/* R:R Ratio */}
+                                <div>
+                                    <label className="block text-gray-300 text-sm font-semibold mb-2">
+                                        Min Risk:Reward Ratio
+                                    </label>
+                                    <select 
+                                        className="w-full bg-slate-700 text-white rounded-lg px-4 py-2 border border-slate-600"
+                                        value={filters.minRRRatio}
+                                        onChange={(e) => setFilters({...filters, minRRRatio: Number(e.target.value)})}
+                                    >
+                                        <option value={0}>Any</option>
+                                        <option value={1.5}>1.5:1</option>
+                                        <option value={2.0}>2:1</option>
+                                        <option value={2.5}>2.5:1</option>
+                                        <option value={3.0}>3:1</option>
+                                    </select>
+                                </div>
+
+                                {/* Sort By */}
+                                <div>
+                                    <label className="block text-gray-300 text-sm font-semibold mb-2">
+                                        Sort Results By
+                                    </label>
+                                    <select 
+                                        className="w-full bg-slate-700 text-white rounded-lg px-4 py-2 border border-slate-600"
+                                        value={sortBy}
+                                        onChange={(e) => setSortBy(e.target.value)}
+                                    >
+                                        <option value="grade">Grade (A-D)</option>
+                                        <option value="volume">Volume (High-Low)</option>
+                                        <option value="marketCap">Market Cap</option>
+                                        <option value="atr">Volatility (ATR)</option>
+                                        <option value="rrRatio">Risk:Reward Ratio</option>
+                                    </select>
+                                </div>
+                            </div>
+
+                            {/* Reset Button */}
+                            <div className="mt-4 text-center">
+                                <button 
+                                    onClick={() => setFilters({
+                                        minMarketCap: 100000000,
+                                        maxMarketCap: 100000000000,
+                                        minVolume: 10000000,
+                                        minAtr: 5,
+                                        maxRsi: 100,
+                                        minRsi: 0,
+                                        trend: 'all',
+                                        macd: 'all',
+                                        minCommunity: 0,
+                                        minGithub: 0,
+                                        hasCatalysts: false,
+                                        minRRRatio: 0
+                                    })}
+                                    className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg transition"
+                                >
+                                    <i className="fas fa-redo mr-2"></i>
+                                    Reset All Filters
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Results */}
+                        <div className="space-y-4">
+                            {filteredCoins.length === 0 ? (
+                                <div className="bg-slate-800 rounded-xl p-12 text-center border border-slate-700">
+                                    <i className="fas fa-search text-6xl text-gray-600 mb-4"></i>
+                                    <h3 className="text-2xl font-bold text-gray-400 mb-2">No Coins Match Your Criteria</h3>
+                                    <p className="text-gray-500">Try adjusting your filters to see more results</p>
+                                </div>
+                            ) : (
+                                filteredCoins.map(coin => (
+                                    <div key={coin.id} className="coin-card bg-slate-800 rounded-xl p-6">
+                                        <div className="flex flex-col md:flex-row gap-6">
+                                            {/* Left: Coin Info & Grade */}
+                                            <div className="flex items-start gap-4 md:w-1/4">
+                                                <div className={`grade-${coin.grade} w-16 h-16 rounded-xl flex items-center justify-center text-3xl font-bold text-white shadow-lg flex-shrink-0`}>
+                                                    {coin.grade}
+                                                </div>
+                                                <div>
+                                                    <div className="flex items-center gap-2">
+                                                        <h3 className="text-2xl font-bold text-white">{coin.symbol}</h3>
+                                                        <span className="text-xs bg-slate-700 text-gray-400 px-2 py-1 rounded">#{coin.marketCapRank}</span>
+                                                    </div>
+                                                    <p className="text-gray-400">{coin.name}</p>
+                                                    <p className="text-blue-400 font-bold text-xl mt-1">${coin.price?.toFixed(2)}</p>
+                                                    {coin.priceChange24h && (
+                                                        <p className={`text-sm font-semibold ${coin.priceChange24h > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                                            {coin.priceChange24h > 0 ? '+' : ''}{coin.priceChange24h.toFixed(2)}% (24h)
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            {/* Middle: Key Metrics */}
+                                            <div className="md:w-2/4 grid grid-cols-2 gap-4">
+                                                <div>
+                                                    <div className="text-gray-400 text-xs mb-1">Market Cap</div>
+                                                    <div className="text-white font-bold">{formatNumber(coin.marketCap)}</div>
+                                                </div>
+                                                <div>
+                                                    <div className="text-gray-400 text-xs mb-1">24h Volume</div>
+                                                    <div className="text-white font-bold">{formatNumber(coin.volume)}</div>
+                                                </div>
+                                                <div>
+                                                    <div className="text-gray-400 text-xs mb-1">Volatility (ATR)</div>
+                                                    <div className="text-purple-400 font-bold">{coin.atr}%</div>
+                                                </div>
+                                                <div>
+                                                    <div className="text-gray-400 text-xs mb-1">RSI</div>
+                                                    <div className={`font-bold ${coin.rsi > 70 ? 'text-red-400' : coin.rsi < 30 ? 'text-green-400' : 'text-yellow-400'}`}>
+                                                        {coin.rsi}
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <div className="text-gray-400 text-xs mb-1">Trend</div>
+                                                    <div className={`font-bold capitalize ${coin.trend === 'uptrend' ? 'bullish' : coin.trend === 'downtrend' ? 'bearish' : 'neutral'}`}>
+                                                        {coin.trend === 'uptrend' && <i className="fas fa-arrow-trend-up mr-1"></i>}
+                                                        {coin.trend === 'downtrend' && <i className="fas fa-arrow-trend-down mr-1"></i>}
+                                                        {coin.trend === 'sideways' && <i className="fas fa-arrows-left-right mr-1"></i>}
+                                                        {coin.trend}
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <div className="text-gray-400 text-xs mb-1">MACD</div>
+                                                    <div className={`font-bold capitalize ${coin.macd === 'bullish' ? 'bullish' : coin.macd === 'bearish' ? 'bearish' : 'neutral'}`}>
+                                                        {coin.macd}
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <div className="text-gray-400 text-xs mb-1">Risk:Reward</div>
+                                                    <div className="text-green-400 font-bold">1:{coin.rrRatio}</div>
+                                                </div>
+                                                <div>
+                                                    <div className="text-gray-400 text-xs mb-1">Stop Loss</div>
+                                                    <div className="text-red-400 font-bold">{coin.stopLossDistance.toFixed(1)}%</div>
+                                                </div>
+                                            </div>
+
+                                            {/* Right: Fundamentals & Actions */}
+                                            <div className="md:w-1/4 space-y-3">
+                                                <div>
+                                                    <div className="text-gray-400 text-xs mb-1">Use Case</div>
+                                                    <div className="text-white text-sm font-semibold">{coin.useCase}</div>
+                                                </div>
+                                                <div className="flex gap-2">
+                                                    <div className="flex-1">
+                                                        <div className="text-gray-400 text-xs mb-1">Community</div>
+                                                        <div className="bg-slate-700 rounded-full h-2 overflow-hidden">
+                                                            <div className="bg-blue-500 h-full" style={{width: `${coin.community}%`}}></div>
+                                                        </div>
+                                                        <div className="text-blue-400 text-xs text-center mt-1">{coin.community}/100</div>
+                                                    </div>
+                                                    <div className="flex-1">
+                                                        <div className="text-gray-400 text-xs mb-1">Dev Activity</div>
+                                                        <div className="bg-slate-700 rounded-full h-2 overflow-hidden">
+                                                            <div className="bg-green-500 h-full" style={{width: `${coin.githubActivity}%`}}></div>
+                                                        </div>
+                                                        <div className="text-green-400 text-xs text-center mt-1">{coin.githubActivity}/100</div>
+                                                    </div>
+                                                </div>
+                                                {coin.catalysts && coin.catalysts.length > 0 && (
+                                                    <div>
+                                                        <div className="text-yellow-400 text-xs mb-1 font-semibold">
+                                                            <i className="fas fa-rocket mr-1"></i>
+                                                            Catalysts:
+                                                        </div>
+                                                        {coin.catalysts.map((catalyst, idx) => (
+                                                            <div key={idx} className="text-white text-xs bg-slate-700 rounded px-2 py-1 mb-1">
+                                                                • {catalyst}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                <div className="flex flex-wrap gap-1">
+                                                    {coin.exchanges.map((exchange, idx) => (
+                                                        <span key={idx} className="text-xs bg-blue-900 text-blue-200 px-2 py-1 rounded">
+                                                            {exchange}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))
+                            )}
+                        </div>
+
+                        {/* Footer */}
+                        <div className="mt-8 text-center text-gray-500 text-sm space-y-2">
+                            <p>
+                                <i className="fas fa-check-circle text-green-500 mr-2"></i>
+                                Automatically scanning top {coinLimit} coins by market cap
+                            </p>
+                            <p>
+                                <i className="fas fa-robot text-blue-400 mr-2"></i>
+                                Live data from CoinGecko & Binance APIs
+                            </p>
+                            <p className="text-gray-600">⚠️ This is a screening tool only. Always conduct your own research before trading.</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        ReactDOM.render(<CryptoScreener />, document.getElementById('root'));
+    </script>
+</body>
+</html>
