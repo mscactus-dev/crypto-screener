@@ -1,52 +1,23 @@
 #!/usr/bin/env python3
 """
 Bitcoin Financial Astrology Calculator
-Pure mathematical implementation using Kepler's equations
-Calculates planetary positions and aspects to Bitcoin's natal chart
+Uses accurate ephemeris data from CSV file for planetary positions
+Calculates aspects to Bitcoin's natal chart
 """
 
 import math
-from datetime import datetime, timezone
-from typing import Dict, List, Tuple
+import csv
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Tuple, Optional
+from pathlib import Path
 
-# ==================== ASTRONOMICAL CONSTANTS ====================
-
-# Julian Date constants
-JD_J2000 = 2451545.0  # J2000.0 epoch (Jan 1, 2000, 12:00 TT)
-
-# Orbital elements for planets at J2000.0 epoch
-# Format: [a, e, I, L, long_peri, long_node]
-# a = semi-major axis (AU), e = eccentricity, I = inclination (deg)
-# L = mean longitude (deg), long_peri = longitude of perihelion (deg)
-# long_node = longitude of ascending node (deg)
-
-ORBITAL_ELEMENTS = {
-    'Sun': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],  # Earth around Sun (we'll invert)
-    'Moon': [0.00257, 0.0549, 5.145, 218.316, 318.15, 125.08],  # Approximate
-    'Mercury': [0.38710, 0.20563, 7.005, 252.251, 77.456, 48.331],
-    'Venus': [0.72333, 0.00677, 3.395, 181.980, 131.563, 76.680],
-    'Mars': [1.52368, 0.09340, 1.850, 355.433, 336.060, 49.558],
-    'Jupiter': [5.20260, 0.04849, 1.303, 34.351, 14.753, 100.464],
-    'Saturn': [9.55491, 0.05551, 2.489, 50.078, 93.057, 113.665],
-    'Uranus': [19.21845, 0.04630, 0.773, 314.055, 173.005, 74.006],
-    'Neptune': [30.11039, 0.00899, 1.770, 304.880, 48.120, 131.784],
-    'Pluto': [39.48169, 0.24881, 17.140, 238.930, 224.067, 110.307]
-}
-
-# Orbital element rates (per century from J2000)
-ORBITAL_RATES = {
-    'Mercury': [0.00000, 0.00002, -0.0001, 149472.6746, 0.1589, -0.1061],
-    'Venus': [0.00000, -0.00005, -0.0001, 58517.8149, 0.0529, -0.0278],
-    'Mars': [0.00000, 0.00009, -0.0003, 19139.8585, 0.4484, -0.0106],
-    'Jupiter': [0.00000, -0.00012, -0.0001, 3034.9056, 0.1703, 0.0328],
-    'Saturn': [0.00000, -0.00036, -0.0001, 1222.1138, 0.1302, -0.0492],
-    'Uranus': [0.00000, -0.00004, 0.0000, 428.4677, 0.0516, 0.0565],
-    'Neptune': [0.00000, 0.00005, 0.0000, 218.4862, -0.0054, -0.0059],
-    'Pluto': [0.00000, -0.00006, 0.0000, 145.1847, -0.0044, -0.0099]
-}
+# ==================== CONSTANTS ====================
 
 # Bitcoin Genesis Block (Natal Chart)
 BITCOIN_GENESIS = datetime(2009, 1, 3, 18, 15, 5, tzinfo=timezone.utc)
+
+# CSV Ephemeris file path
+CSV_PATH = Path(__file__).parent / "CLAUDE Planetary Positions 2025-2035.csv"
 
 # Aspect definitions
 ASPECTS = {
@@ -61,19 +32,118 @@ MALEFIC_PLANETS = ['Mars', 'Saturn']
 BENEFIC_PLANETS = ['Jupiter', 'Venus']
 NATAL_POINTS = ['Sun', 'Moon']  # Simplified - in real astrology would include Ascendant
 
+# ==================== CSV EPHEMERIS LOADER ====================
+
+class EphemerisData:
+    """Loads and interpolates planetary positions from CSV"""
+
+    def __init__(self, csv_path: Path):
+        self.data = []
+        self.load_csv(csv_path)
+
+    def load_csv(self, csv_path: Path):
+        """Load ephemeris data from CSV file"""
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Ephemeris file not found: {csv_path}")
+
+        with open(csv_path, 'r') as f:
+            # Skip the title row
+            f.readline()
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Parse the date
+                date_str = row['date_utc']
+                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+
+                # Store data
+                self.data.append({
+                    'datetime': dt,
+                    'jd': float(row['JD']),
+                    'Sun': float(row['Sun_lon']),
+                    'Moon': float(row['Moon_lon']),
+                    'Mercury': float(row['Mercury_lon']),
+                    'Venus': float(row['Venus_lon']),
+                    'Mars': float(row['Mars_lon']),
+                    'Jupiter': float(row['Jupiter_lon']),
+                    'Saturn': float(row['Saturn_lon']),
+                    'Uranus': float(row['Uranus_lon']),
+                    'Neptune': float(row['Neptune_lon']),
+                    'Ascendant': float(row['Ascendant_deg']),
+                    'MC': float(row['MC_deg']),
+                    'Mercury_retro': int(row['Mercury_retro']) == 1,
+                    'Venus_retro': int(row['Venus_retro']) == 1,
+                    'Mars_retro': int(row['Mars_retro']) == 1,
+                    'Jupiter_retro': int(row['Jupiter_retro']) == 1,
+                    'Saturn_retro': int(row['Saturn_retro']) == 1,
+                    'Uranus_retro': int(row['Uranus_retro']) == 1,
+                    'Neptune_retro': int(row['Neptune_retro']) == 1,
+                })
+
+        print(f"Loaded {len(self.data)} ephemeris entries from {csv_path.name}")
+
+    def get_positions(self, dt: datetime) -> Optional[Dict]:
+        """Get planetary positions for a given datetime (with interpolation)"""
+        if not self.data:
+            return None
+
+        # Check if date is in range
+        if dt < self.data[0]['datetime'] or dt > self.data[-1]['datetime']:
+            print(f"Warning: Date {dt} is outside ephemeris range")
+            return None
+
+        # Find the two surrounding dates
+        for i in range(len(self.data) - 1):
+            if self.data[i]['datetime'] <= dt <= self.data[i + 1]['datetime']:
+                # Linear interpolation
+                d1 = self.data[i]
+                d2 = self.data[i + 1]
+
+                # Calculate interpolation factor
+                total_seconds = (d2['datetime'] - d1['datetime']).total_seconds()
+                elapsed_seconds = (dt - d1['datetime']).total_seconds()
+                factor = elapsed_seconds / total_seconds if total_seconds > 0 else 0
+
+                # Interpolate positions
+                result = {'datetime': dt}
+
+                planets = ['Sun', 'Moon', 'Mercury', 'Venus', 'Mars',
+                          'Jupiter', 'Saturn', 'Uranus', 'Neptune']
+
+                for planet in planets:
+                    lon1 = d1[planet]
+                    lon2 = d2[planet]
+
+                    # Handle 360° wraparound
+                    if abs(lon2 - lon1) > 180:
+                        if lon2 < lon1:
+                            lon2 += 360
+                        else:
+                            lon1 += 360
+
+                    # Interpolate
+                    lon = lon1 + (lon2 - lon1) * factor
+                    result[planet] = lon % 360
+
+                # Use retrograde status from closest date
+                closest = d1 if factor < 0.5 else d2
+                for planet in ['Mercury', 'Venus', 'Mars', 'Jupiter', 'Saturn', 'Uranus', 'Neptune']:
+                    result[f'{planet}_retro'] = closest[f'{planet}_retro']
+
+                return result
+
+        return None
+
+# Global ephemeris instance
+_ephemeris = None
+
+def get_ephemeris():
+    """Get or create ephemeris instance"""
+    global _ephemeris
+    if _ephemeris is None:
+        _ephemeris = EphemerisData(CSV_PATH)
+    return _ephemeris
+
 # ==================== UTILITY FUNCTIONS ====================
-
-def datetime_to_jd(dt: datetime) -> float:
-    """Convert datetime to Julian Date"""
-    a = (14 - dt.month) // 12
-    y = dt.year + 4800 - a
-    m = dt.month + 12 * a - 3
-
-    jdn = dt.day + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
-
-    jd = jdn + (dt.hour - 12) / 24.0 + dt.minute / 1440.0 + dt.second / 86400.0
-
-    return jd
 
 def normalize_angle(angle: float) -> float:
     """Normalize angle to 0-360 range"""
@@ -90,175 +160,110 @@ def angle_difference(angle1: float, angle2: float) -> float:
         diff = 360 - diff
     return diff
 
-# ==================== KEPLER'S EQUATION SOLVER ====================
+# ==================== FALLBACK: SIMPLIFIED CALCULATIONS ====================
 
-def solve_kepler(M: float, e: float, tolerance: float = 1e-6) -> float:
+def calculate_pluto_position(dt: datetime) -> float:
+    """Calculate approximate Pluto position (not in CSV)"""
+    # Very simplified - Pluto moves ~1.5° per year
+    days_since_j2000 = (dt - datetime(2000, 1, 1, 12, 0, 0, tzinfo=timezone.utc)).days
+    years = days_since_j2000 / 365.25
+
+    # Pluto was at ~251° in 2000
+    pluto_lon = 251.0 + years * 1.5
+    return pluto_lon % 360
+
+def calculate_fallback_positions(dt: datetime) -> Dict[str, Dict]:
     """
-    Solve Kepler's equation: M = E - e*sin(E)
-    M = mean anomaly (radians)
-    e = eccentricity
-    Returns eccentric anomaly E (radians)
+    Calculate approximate positions using simplified formulas
+    Used for Bitcoin natal chart (2009) which is outside CSV range
     """
-    E = M  # Initial guess
+    # Days since J2000 epoch
+    days_since_j2000 = (dt - datetime(2000, 1, 1, 12, 0, 0, tzinfo=timezone.utc)).days
 
-    for _ in range(30):  # Max iterations
-        delta = E - e * math.sin(E) - M
-        if abs(delta) < tolerance:
-            break
-        E = E - delta / (1 - e * math.cos(E))
-
-    return E
-
-# ==================== PLANETARY POSITION CALCULATOR ====================
-
-def calculate_planet_position(planet: str, jd: float) -> Dict:
-    """
-    Calculate heliocentric position of a planet using orbital elements
-    Returns dict with longitude, latitude, distance
-    """
-    if planet not in ORBITAL_ELEMENTS:
-        raise ValueError(f"Unknown planet: {planet}")
-
-    # Get orbital elements
-    elements = ORBITAL_ELEMENTS[planet].copy()
-
-    # Calculate centuries from J2000
-    T = (jd - JD_J2000) / 36525.0
-
-    # Apply rates if available
-    if planet in ORBITAL_RATES:
-        rates = ORBITAL_RATES[planet]
-        for i in range(6):
-            elements[i] += rates[i] * T
-
-    a, e, I, L, long_peri, long_node = elements
-
-    # Convert to radians
-    I_rad = math.radians(I)
-    L_rad = math.radians(L)
-    long_peri_rad = math.radians(long_peri)
-    long_node_rad = math.radians(long_node)
-
-    # Calculate mean anomaly
-    M = L_rad - long_peri_rad
-    M = M % (2 * math.pi)
-
-    # Solve Kepler's equation for eccentric anomaly
-    E = solve_kepler(M, e)
-
-    # Calculate true anomaly
-    nu = 2 * math.atan2(
-        math.sqrt(1 + e) * math.sin(E / 2),
-        math.sqrt(1 - e) * math.cos(E / 2)
-    )
-
-    # Calculate heliocentric distance
-    r = a * (1 - e * math.cos(E))
-
-    # Calculate heliocentric longitude
-    lon = nu + long_peri_rad
-    lon = lon % (2 * math.pi)
-
-    # For simplicity, we'll use 2D ecliptic coordinates
-    # Full 3D calculation would include latitude effects
-
-    return {
-        'longitude': math.degrees(lon) % 360,
-        'distance': r,
-        'planet': planet
-    }
-
-def calculate_sun_position(jd: float) -> Dict:
-    """Calculate geocentric Sun position (Earth around Sun inverted)"""
-    # Calculate Earth's position
-    elements = [1.00000011, 0.01671022, 0.00005,
-                100.46435 + 35999.37306 * ((jd - JD_J2000) / 36525.0),
-                102.94719, 0.0]
-
-    a, e, I, L, long_peri, long_node = elements
-
-    L_rad = math.radians(L)
-    long_peri_rad = math.radians(long_peri)
-
-    M = L_rad - long_peri_rad
-    M = M % (2 * math.pi)
-
-    E = solve_kepler(M, e)
-
-    nu = 2 * math.atan2(
-        math.sqrt(1 + e) * math.sin(E / 2),
-        math.sqrt(1 - e) * math.cos(E / 2)
-    )
-
-    # Sun's apparent longitude (from Earth)
-    lon = (nu + long_peri_rad + math.pi) % (2 * math.pi)
-
-    return {
-        'longitude': math.degrees(lon) % 360,
-        'distance': a,
-        'planet': 'Sun'
-    }
-
-def calculate_moon_position(jd: float) -> Dict:
-    """Simplified Moon position calculation"""
-    T = (jd - JD_J2000) / 36525.0
-
-    # Simplified lunar position (good to ~1-2 degrees)
-    L0 = 218.316 + 481267.8813 * T  # Mean longitude
-    l = 134.963 + 477198.8676 * T   # Mean anomaly
-    F = 93.272 + 483202.0175 * T    # Argument of latitude
-
-    # Main perturbations
-    lon = L0 + 6.289 * math.sin(math.radians(l))
-    lon = lon % 360
-
-    return {
-        'longitude': lon,
-        'distance': 0.00257,  # AU (average)
-        'planet': 'Moon'
-    }
-
-def get_all_positions(jd: float) -> Dict[str, Dict]:
-    """Calculate positions for all planets at given Julian Date"""
+    # Approximate mean motion (degrees per day)
     positions = {}
 
-    # Sun
-    positions['Sun'] = calculate_sun_position(jd)
+    # Sun (actually Earth's orbit)
+    sun_lon = (280.46 + 0.9856474 * days_since_j2000) % 360
+    positions['Sun'] = {'longitude': sun_lon, 'planet': 'Sun', 'retrograde': False}
 
-    # Moon
-    positions['Moon'] = calculate_moon_position(jd)
+    # Moon (very approximate)
+    moon_lon = (218.316 + 13.176396 * days_since_j2000) % 360
+    positions['Moon'] = {'longitude': moon_lon, 'planet': 'Moon', 'retrograde': False}
 
-    # Planets
-    for planet in ['Mercury', 'Venus', 'Mars', 'Jupiter', 'Saturn', 'Uranus', 'Neptune', 'Pluto']:
-        positions[planet] = calculate_planet_position(planet, jd)
+    # Mercury
+    mercury_lon = (252.25 + 4.092338 * days_since_j2000) % 360
+    positions['Mercury'] = {'longitude': mercury_lon, 'planet': 'Mercury', 'retrograde': False}
+
+    # Venus
+    venus_lon = (181.98 + 1.602131 * days_since_j2000) % 360
+    positions['Venus'] = {'longitude': venus_lon, 'planet': 'Venus', 'retrograde': False}
+
+    # Mars
+    mars_lon = (355.43 + 0.524039 * days_since_j2000) % 360
+    positions['Mars'] = {'longitude': mars_lon, 'planet': 'Mars', 'retrograde': False}
+
+    # Jupiter
+    jupiter_lon = (34.35 + 0.083056 * days_since_j2000) % 360
+    positions['Jupiter'] = {'longitude': jupiter_lon, 'planet': 'Jupiter', 'retrograde': False}
+
+    # Saturn
+    saturn_lon = (50.08 + 0.033459 * days_since_j2000) % 360
+    positions['Saturn'] = {'longitude': saturn_lon, 'planet': 'Saturn', 'retrograde': False}
+
+    # Uranus
+    uranus_lon = (314.05 + 0.011733 * days_since_j2000) % 360
+    positions['Uranus'] = {'longitude': uranus_lon, 'planet': 'Uranus', 'retrograde': False}
+
+    # Neptune
+    neptune_lon = (304.88 + 0.005981 * days_since_j2000) % 360
+    positions['Neptune'] = {'longitude': neptune_lon, 'planet': 'Neptune', 'retrograde': False}
+
+    # Pluto
+    positions['Pluto'] = {
+        'longitude': calculate_pluto_position(dt),
+        'planet': 'Pluto',
+        'retrograde': False
+    }
 
     return positions
 
-# ==================== RETROGRADE DETECTION ====================
+# ==================== GET POSITIONS ====================
 
-def is_retrograde(planet: str, jd: float, delta_days: float = 1.0) -> bool:
-    """
-    Detect if a planet is retrograde by comparing positions
-    delta_days: how many days ahead to check
-    """
-    if planet == 'Sun' or planet == 'Moon':
-        return False  # Sun and Moon don't go retrograde
+def get_all_positions(dt: datetime) -> Dict[str, Dict]:
+    """Get positions for all planets at given datetime"""
+    positions = {}
 
-    pos1 = calculate_planet_position(planet, jd)
-    pos2 = calculate_planet_position(planet, jd + delta_days)
+    # Try to get from ephemeris CSV
+    ephemeris = get_ephemeris()
+    ephem_data = ephemeris.get_positions(dt)
 
-    lon1 = pos1['longitude']
-    lon2 = pos2['longitude']
+    if ephem_data:
+        # Use accurate ephemeris data from CSV
+        planets = ['Sun', 'Moon', 'Mercury', 'Venus', 'Mars',
+                  'Jupiter', 'Saturn', 'Uranus', 'Neptune']
 
-    # Check if longitude decreased (accounting for 0/360 wraparound)
-    if abs(lon2 - lon1) > 180:
-        # Wrapped around
-        if lon2 < lon1:
-            lon2 += 360
-        else:
-            lon1 += 360
+        for planet in planets:
+            positions[planet] = {
+                'longitude': ephem_data[planet],
+                'planet': planet
+            }
 
-    return lon2 < lon1
+            # Add retrograde status if available
+            if f'{planet}_retro' in ephem_data:
+                positions[planet]['retrograde'] = ephem_data[f'{planet}_retro']
+
+        # Add Pluto (not in CSV, use calculation)
+        positions['Pluto'] = {
+            'longitude': calculate_pluto_position(dt),
+            'planet': 'Pluto',
+            'retrograde': False  # Not tracking Pluto retrograde
+        }
+    else:
+        # Fallback to calculated positions (for dates outside CSV range, like Bitcoin genesis)
+        positions = calculate_fallback_positions(dt)
+
+    return positions
 
 # ==================== ASPECT CALCULATIONS ====================
 
@@ -352,17 +357,17 @@ def check_mars_uranus_hard_aspect(positions: Dict) -> Tuple[bool, str]:
 
 def find_upcoming_transits(natal_positions: Dict, days_ahead: int = 30) -> List[Dict]:
     """Find major transits coming up in the next N days"""
-    now_jd = datetime_to_jd(datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
     upcoming = []
 
     # Check each day
     for day_offset in range(1, days_ahead + 1):
-        future_jd = now_jd + day_offset
-        future_date = datetime.now(timezone.utc).replace(
-            day=datetime.now(timezone.utc).day
-        )  # Simplified
+        future_date = now + timedelta(days=day_offset)
 
-        positions = get_all_positions(future_jd)
+        positions = get_all_positions(future_date)
+        if not positions:
+            continue
+
         aspects = find_aspects_to_natal(positions, natal_positions)
 
         # Look for significant aspects
@@ -378,7 +383,8 @@ def find_upcoming_transits(natal_positions: Dict, days_ahead: int = 30) -> List[
 
                 upcoming.append({
                     'date': f"Day +{day_offset}",
-                    'transit': f"{aspect['transit_planet']} {aspect['aspect']} {aspect['natal_planet']}",
+                    'exact_date': future_date.strftime('%Y-%m-%d'),
+                    'transit': f"{aspect['transit_planet']} {aspect['aspect']} natal {aspect['natal_planet']}",
                     'orb': aspect['orb']
                 })
 
@@ -398,14 +404,12 @@ def find_upcoming_transits(natal_positions: Dict, days_ahead: int = 30) -> List[
 def analyze_bitcoin_astrology() -> Dict:
     """Main function to analyze Bitcoin's current astrological situation"""
 
-    # Calculate Bitcoin's natal chart
-    genesis_jd = datetime_to_jd(BITCOIN_GENESIS)
-    natal_positions = get_all_positions(genesis_jd)
+    # Calculate Bitcoin's natal chart (will use fallback for 2009)
+    natal_positions = get_all_positions(BITCOIN_GENESIS)
 
-    # Calculate current positions
+    # Calculate current positions (will use CSV if in 2025-2035 range)
     now = datetime.now(timezone.utc)
-    current_jd = datetime_to_jd(now)
-    current_positions = get_all_positions(current_jd)
+    current_positions = get_all_positions(now)
 
     # Find all aspects
     aspects = find_aspects_to_natal(current_positions, natal_positions)
@@ -414,14 +418,30 @@ def analyze_bitcoin_astrology() -> Dict:
     malefic_count = count_malefic_aspects(aspects)
     benefic_count = count_benefic_aspects(aspects)
 
-    # Check Mercury retrograde
-    mercury_retrograde = is_retrograde('Mercury', current_jd)
+    # Check Mercury retrograde (from CSV data)
+    mercury_retrograde = current_positions.get('Mercury', {}).get('retrograde', False)
 
     # Check Mars-Uranus hard aspect
     mars_uranus_hard, mars_uranus_desc = check_mars_uranus_hard_aspect(current_positions)
 
     # Find upcoming transits
     upcoming_transits = find_upcoming_transits(natal_positions, days_ahead=30)
+
+    # Determine data source
+    ephemeris = get_ephemeris()
+    current_from_csv = ephemeris.get_positions(now) is not None
+    natal_from_csv = ephemeris.get_positions(BITCOIN_GENESIS) is not None
+
+    data_source = []
+    if current_from_csv:
+        data_source.append("Current: CSV Ephemeris (accurate)")
+    else:
+        data_source.append("Current: Calculated (approximate)")
+
+    if natal_from_csv:
+        data_source.append("Natal: CSV Ephemeris")
+    else:
+        data_source.append("Natal: Calculated (2009 data)")
 
     # Prepare result
     result = {
@@ -434,7 +454,8 @@ def analyze_bitcoin_astrology() -> Dict:
         'current_positions': {k: f"{v['longitude']:.2f}°" for k, v in current_positions.items()},
         'natal_positions': {k: f"{v['longitude']:.2f}°" for k, v in natal_positions.items()},
         'all_aspects': aspects,
-        'upcoming_transits': upcoming_transits
+        'upcoming_transits': upcoming_transits,
+        'data_source': ' | '.join(data_source)
     }
 
     return result
@@ -446,12 +467,19 @@ if __name__ == '__main__':
 
     print("=" * 70)
     print("BITCOIN FINANCIAL ASTROLOGY ANALYSIS")
+    print("Using Accurate CSV Ephemeris Data")
     print("=" * 70)
 
     result = analyze_bitcoin_astrology()
 
+    if 'error' in result:
+        print(f"\n⚠ ERROR: {result['error']}")
+        print(f"Note: {result.get('note', '')}")
+        exit(1)
+
     print(f"\nCurrent Date: {result['current_date']}")
     print(f"Bitcoin Genesis: {result['bitcoin_genesis']}")
+    print(f"Data Source: {result['data_source']}")
     print(f"\n{'─' * 70}")
     print(f"MALEFIC ASPECTS (Mars/Saturn hard aspects): {result['malefic_aspects']}")
     print(f"BENEFIC ASPECTS (Jupiter/Venus harmonious): {result['benefic_aspects']}")
@@ -475,7 +503,7 @@ if __name__ == '__main__':
         print(f"\n{'─' * 70}")
         print("ALL CURRENT ASPECTS TO NATAL CHART")
         print(f"{'─' * 70}")
-        for aspect in result['all_aspects'][:15]:  # Show first 15
+        for aspect in result['all_aspects'][:20]:  # Show first 20
             print(f"{aspect['transit_planet']:10s} {aspect['aspect']:12s} "
                   f"natal {aspect['natal_planet']:10s} (orb: {aspect['orb']:.2f}°)")
 
@@ -484,7 +512,8 @@ if __name__ == '__main__':
         print("UPCOMING MAJOR TRANSITS (Next 30 Days)")
         print(f"{'─' * 70}")
         for transit in result['upcoming_transits']:
-            print(f"{transit['date']:10s}: {transit['transit']} (orb: {transit['orb']:.2f}°)")
+            print(f"{transit['exact_date']:12s} ({transit['date']:10s}): "
+                  f"{transit['transit']} (orb: {transit['orb']:.2f}°)")
 
     print(f"\n{'─' * 70}")
     print("Analysis complete!")
